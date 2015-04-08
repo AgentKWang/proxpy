@@ -45,7 +45,7 @@ class ProxyHandler(SocketServer.StreamRequestHandler):
         self.peer = False
         self.keepalive = False
         self.target = None
-
+        self.tunnel_mode = False
         # Just for debugging
         self.counter = 0
         self._host = None
@@ -92,7 +92,9 @@ class ProxyHandler(SocketServer.StreamRequestHandler):
 
     def handle(self):
         global proxystate
-
+        if self.tunnel_mode:
+            self.doFORWARD()
+            return
         if self.keepalive:
             if self.peer:
                 HTTPSUtil.wait_read(self.request)
@@ -178,24 +180,28 @@ class ProxyHandler(SocketServer.StreamRequestHandler):
         return data
 
     def doCONNECT(self, host, port, req):
-        global proxystate
-
-        socket_req = self.request
-        certfilename = DEFAULT_CERT_FILE
-        socket_ssl = ssl.wrap_socket(socket_req, server_side = True, certfile = certfilename, 
-                                     ssl_version = ssl.PROTOCOL_SSLv23, do_handshake_on_connect = False)
-
-        HTTPSRequest.sendAck(socket_req)
-        
+        #global proxystate
+        self.tunnel_mode = True
+        self.tunnel_host = host
+        self.tunnel_port = port
+        #socket_req = self.request
+        #certfilename = DEFAULT_CERT_FILE
+        #socket_ssl = ssl.wrap_socket(socket_req, server_side = True, certfile = certfilename, 
+                                     #ssl_version = ssl.PROTOCOL_SSLv23, do_handshake_on_connect = False)
+        HTTPSRequest.sendAck(self.request)
+        #print "Send ack to the peer %s on port %d for establishing SSL tunnel" % (host, port)
+        print "into forward mode: %s : %s" % (host, port)
+        '''
         host, port = socket_req.getpeername()
         proxystate.log.debug("Send ack to the peer %s on port %d for establishing SSL tunnel" % (host, port))
-
+        
         while True:
             try:
                 socket_ssl.do_handshake()
                 break
-            except (ssl.SSLError, IOError):
+            except (ssl.SSLError, IOError) as e:
                 # proxystate.log.error(e.__str__())
+                print e.__str__()
                 return
 
         # Switch to new socket
@@ -204,6 +210,31 @@ class ProxyHandler(SocketServer.StreamRequestHandler):
 
         self.setup()
         self.handle()
+'''
+    def doFORWARD(self):
+        host, port = self.request.getpeername()
+        #print "client_host", host
+        #print "client_port", port
+        print self.tunnel_host
+        print self.tunnel_port
+        print self.rfile.read()
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.connect((self.tunnel_host, self.tunnel_port))
+            s.sendall(self.rfile.read())
+            s.setblocking(0)
+            print self.rfile.read()
+            data = []
+            chunk = s.recv(1024)
+            while len(chunk) != 0:
+                print chunk
+                data.append(chunk)
+                chunk = s.recv(1024)
+            s.close()
+            self.request.sendall(b''.join(data))
+        except socket.error as e:
+            print e.__str__()
+        print "send %d bytes to %s : %s"%(len(data),host, port)
 
     def _getresponse(self, conn):
         try:
@@ -221,7 +252,17 @@ class ProxyHandler(SocketServer.StreamRequestHandler):
 
         code = res.status
         msg = res.reason
-
+        if 'Transfer-Encoding: chunked\r\n' in res.msg.headers:
+            del res.msg.headers[res.msg.headers.index('Transfer-Encoding: chunked\r\n')]
+            content_length = len(body)
+            res.msg.headers.append("Content-Length: %s\r\n"%str(content_length))
+        '''
+        if 'Cache-Control: private, no-cache, no-store, must-revalidate, post-check=0, pre-check=0\r\n' in res.msg.headers:
+            del res.msg.headers[res.msg.headers.index('Cache-Control: private, no-cache, no-store, must-revalidate, post-check=0, pre-check=0\r\n')]
+        if 'Pragma: no-cache\r\n' in res.msg.headers:
+            del res.msg.headers[res.msg.headers.index('Pragma: no-cache\r\n')]
+        '''
+        #print res.msg.headers
         res = HTTPResponse(proto, code, msg, res.msg.headers, body)
 
         return res
@@ -244,7 +285,7 @@ class ProxyServer():
         # Start a thread with the server (that thread will then spawn a worker
         # thread for each request)
         server_thread = threading.Thread(target = self.proxyServer.serve_forever)
-    
+        
         # Exit the server thread when the main thread terminates
         server_thread.setDaemon(True)
         proxystate.log.info("Server %s listening on port %d" % (self.proxyServer_host, self.proxyServer_port))
