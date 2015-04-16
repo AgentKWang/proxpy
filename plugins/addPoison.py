@@ -6,7 +6,7 @@ Created on Apr 8, 2015
 import zlib
 
 def proxy_mangle_request(req):
-    print req
+    #print req
     return req
 
 def proxy_mangle_response(res):
@@ -20,5 +20,5 @@ def proxy_mangle_response(res):
             res.setHeader('Content-Length', len(res.body))
             print "#################POSIONED#####################"
             print res.body
-    print res
+    #print res
     return res

